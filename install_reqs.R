@@ -1,7 +1,7 @@
 
 
 drat:::add("ncov-ic")
-install.packages(c("abind", "tideyverse", "data.table", "odin", "odin.dust", "dust", "mcstate", "doBy", "lhs", "truncnorm"))
+install.packages(c("abind", "tidyverse", "data.table", "odin", "odin.dust", "dust", "mcstate", "doBy", "lhs", "truncnorm"))
 
 options(
   repos = structure(c(
