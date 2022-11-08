@@ -7,11 +7,6 @@ library(ggplot2)
 run_current <- TRUE
 run_variant <- TRUE
 
-
-initial_S_dist = matrix(0, nrow=9, ncol=10)
-initial_S_dist[,10] <- 0.7
-initial_S_dist[,1] <- 0.3
-
 param_file <- "parameter_files/parameters_vaccination.xlsx"
 
 calc_seas <- function(date, amount, filename="parameter_files/norm_pred.csv"){
@@ -34,7 +29,8 @@ get_params <- function(initial_S_dist, waning_time=rep(20,11), seas=0, rr_inf= s
     N <- 9
     seasonality <- calc_seas(as.Date("2022-10-01"), amount=seas)
 
-    inc <- 20/0.00076/severity
+    # Estimating approximate starting conditions based on 20 new hospitalisations on the 1st of oct
+    inc <- 20/0.00076/severity 
     I_ini <- 0.6*inc*3
     P_ini <- 0.6*inc*2
     A_ini <- 0.4*inc*5
@@ -90,10 +86,7 @@ get_params <- function(initial_S_dist, waning_time=rep(20,11), seas=0, rr_inf= s
                   dt=0.5,
                   T_waning=T_waning,
                   vaccinations=array(0,dim=c(L, N, n_vac)),
-                                        #    import_vec=rep(0, L),
-                                        #    import_age_prio=rep(1,dim=(N,n_vac,1)),
                   beta_day=matrix(seasonality[1:L], ncol=N, nrow=L),
-                                        #    vac_time_full_effect=array(14.0, N),
                   beta_strain=beta_strain,
                   cross_protection=matrix(0, ncol=n_strain, nrow=n_strain),
                   n=9,
@@ -165,12 +158,6 @@ fit_beta <- function(params, n=300, n_parts =10, n_threads=10, n_best=10){
               data=hosp_inc))
 }
 
-  
-  
-
-
-
-
 diff_time <- function(VE1, VE2, w, A=0.9){
    log(VE1/A) / w - log(VE2/A) / w
 }
@@ -185,6 +172,55 @@ get_waning_times <- function(w, A){
     diff_time(0.35, 0.25, w, A=A),
     diff_time(0.25, 0.15, w, A=A),
     diff_time(0.15, 0.05, w, A=A)))
+}
+
+update_severity <- function(params, severity, change_icu_prob=3.8, change_los_hosp=2.3, base_sev=10){
+    params$hosp_prob <- params$hosp_prob*severity
+    params$icu_prob <- params$icu_prob*min((1 + (change_icu_prob-1)*(severity-1)/(base_sev - 1)), change_icu_prob)
+    params$length_hosp <- params$length_hosp*min((1 + (change_los_hosp-1)*(severity-1)/(base_sev - 1)), change_los_hosp)
+    params$prob_death_hosp <- params$prob_death_icu <- params$prob_death_non_hosp <- params$prob_death_non_hosp*severity
+    return(params)
+}
+
+
+run_scenario <- function(scenario, n=300,n_threads=10, n_best=10, n_parts=10, sims_per_best=5 ){
+  print(scenario$name)
+  initial_S <- fread(scenario$initial_conditions)
+  initial_S[, protection_rounded:=as.character(protection_rounded)]
+  initial_S <- as.matrix(initial_S %>% tidyr::pivot_wider(id_cols=age_group, names_from=protection_rounded, values_from=proportion, values_fill=0) %>% select (-age_group))
+  
+  R <- 1.0
+  waning_time <- c(1e10, get_waning_times(scenario$waning, 0.9))
+  if(waning==0){
+    waning_time <- rep(1e10, 10)
+  }
+  new_params <- get_params(initial_S, waning_time=waning_time, seas=scenario$season, severity=scenario$severity,
+                           include_new_variant=scenario$include_new_variant)
+  new_params <- update_severity(new_params, scenario$severity)
+  param_sets <- fit_beta(new_params, n=n, n_parts=n_parts, n_threads=n_threads, n_best=n_best)
+  r <- run_param_sets(param_sets$param_sets, L=120, sims_per_best,1,n_threads, silent=FALSE) %>%
+    mutate(name=scenario$name,
+           waning=scenario$waning_nice,
+           seasonality=scenario$season_nice,
+           severity=scenario$severity_nice,
+           initial_conditions=scenario$initial_conditions_nice,
+           new_variant= if(is.null(scenario$include_new_variant)) "No" else scenario$include_new_variant$variant_name
+           )
+  if(!is.null(scenario$include_new_variant)){
+    r <- r %>% mutate(variant_beta=scenario$include_new_variant$beta,
+                      variant_severity=scenario$include_new_variant$severity,
+                      variant_initial_frac=scenario$include_new_variant$initial_frac,
+                      variant_rr=min(scenario$include_new_variant$rr_inf)
+                      )
+  }else{
+    r <- r %>% mutate(variant_beta=NA,
+                      variant_severity=NA,
+                      variant_rr=NA,
+                      variant_initial_frac=NA
+                      )
+    
+  }
+  return(r)
 }
 
 i <- 0
@@ -245,71 +281,6 @@ for(initial_conditions in c("medium")){
     }
   }
 }
-
-
-
-
-
-
-update_severity <- function(params, severity, change_icu_prob=3.8, change_los_hosp=2.3, base_sev=10){
-    params$hosp_prob <- params$hosp_prob*severity
-    params$icu_prob <- params$icu_prob*min((1 + (change_icu_prob-1)*(severity-1)/(base_sev - 1)), change_icu_prob)
-    params$length_hosp <- params$length_hosp*min((1 + (change_los_hosp-1)*(severity-1)/(base_sev - 1)), change_los_hosp)
-    params$prob_death_hosp <- params$prob_death_icu <- params$prob_death_non_hosp <- params$prob_death_non_hosp*severity
-    return(params)
-
-}
-
-
-run_scenario <- function(scenario, n=300,n_threads=10, n_best=10, n_parts=10, sims_per_best=5 ){
-  print(scenario$name)
-  initial_S <- fread(scenario$initial_conditions)
-#  initial_S <- rbind(initial_S, data.frame(V1=100, age_group=0, protection_rounded=0.1, proportion=0))
-                                        #  initial_S <- initial_S %>% arrange(age_group, protection_rounded)
-  initial_S[, protection_rounded:=as.character(protection_rounded)]
-  initial_S <- as.matrix(initial_S %>% tidyr::pivot_wider(id_cols=age_group, names_from=protection_rounded, values_from=proportion, values_fill=0) %>% select (-age_group))
-  
-  R <- 1.0
-  waning_time <- c(1e10, get_waning_times(scenario$waning, 0.9))
-  if(waning==0){
-    waning_time <- rep(1e10, 10)
-  }
-  new_params <- get_params(initial_S, waning_time=waning_time, seas=scenario$season, severity=scenario$severity,
-                           include_new_variant=scenario$include_new_variant)
-  new_params <- update_severity(new_params, scenario$severity)
-  ## params <- new_params
-  ## beta_1 <- fix_beta_large(params, params$S_ini, params$I_ini, 1, beta=params$beta_day[1,], use_eig=TRUE)
-  ## new_params$beta_day <- new_params$beta_day * beta_1
-  ## res <- run_params(new_params, 120)
-  
-  param_sets <- fit_beta(new_params, n=n, n_parts=n_parts, n_threads=n_threads, n_best=n_best)
-  r <- run_param_sets(param_sets$param_sets, L=120, sims_per_best,1,n_threads, silent=FALSE) %>% mutate(name=scenario$name,
-                                                                                                   waning=scenario$waning_nice,
-                                                                                                   seasonality=scenario$season_nice,
-                                                                                                   severity=scenario$severity_nice,
-                                                                                                   initial_conditions=scenario$initial_conditions_nice,
-                                                                                                   new_variant= if(is.null(scenario$include_new_variant)) "No" else scenario$include_new_variant$variant_name
-                                                                                                   )
-  if(!is.null(scenario$include_new_variant)){
-    r <- r %>% mutate(variant_beta=scenario$include_new_variant$beta,
-                      variant_severity=scenario$include_new_variant$severity,
-                      variant_initial_frac=scenario$include_new_variant$initial_frac,
-                      variant_rr=min(scenario$include_new_variant$rr_inf)
-                      )
-  }else{
-    r <- r %>% mutate(variant_beta=NA,
-                      variant_severity=NA,
-                      variant_rr=NA,
-                      variant_initial_frac=NA
-                      )
-    
-  }
-  return(r)
-}
-
-
-
-
 if(run_current){
   all_results <- parallel::mclapply(scenarios, function(x) run_scenario(x, n_threads=10, n=400, n_best=10, sims_per_best=5), mc.cores=20, mc.preschedule = F)
   
